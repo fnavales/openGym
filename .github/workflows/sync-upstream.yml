@@ -1,21 +1,27 @@
-name: Sync upstream main
+name: Sync upstream on new tag
 
 on:
   schedule:
-    # Cada noche a las 02:37 UTC
-    - cron: "37 2 * * *"
+    # Cada noche a las 00:00 UTC
+    - cron: "0 0 * * *"
   workflow_dispatch:
+    inputs:
+      force_sync:
+        description: "Forzar sincronización de main aunque no haya nuevo tag"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: sync-upstream-main
+  group: sync-upstream-tag
   cancel-in-progress: false
 
 jobs:
   sync:
-    name: Merge upstream/main into fork/main
+    name: Check and sync new upstream tags
     runs-on: ubuntu-latest
 
     steps:
@@ -28,23 +34,49 @@ jobs:
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Add upstream remote
         run: |
-          git remote add upstream \
-            https://github.com/DuarteSantos8/openGym.git
+          git remote add upstream https://github.com/DuarteSantos8/openGym.git
 
-      - name: Fetch latest changes
+      - name: Fetch latest changes and tags
         run: |
-          git fetch origin main
-          git fetch upstream main
+          git fetch origin main --tags
+          git fetch upstream main --tags
 
-      - name: Merge upstream/main
+      - name: Check for new tags in upstream
+        id: check_tags
         run: |
-          git merge --no-edit upstream/main
+          ORIGIN_TAGS=$(git ls-remote --tags --refs origin | awk -F'/' '{print $3}' | sort)
+          UPSTREAM_TAGS=$(git ls-remote --tags --refs upstream | awk -F'/' '{print $3}' | sort)
+          NEW_TAGS=$(comm -13 <(echo "$ORIGIN_TAGS") <(echo "$UPSTREAM_TAGS"))
 
-      - name: Push updated main to fork
+          if [ -n "$NEW_TAGS" ]; then
+            echo "Nuevos tags detectados en upstream:"
+            echo "$NEW_TAGS"
+            LATEST_TAG=$(echo "$NEW_TAGS" | sort -V | tail -n 1)
+            echo "Último tag a fusionar: $LATEST_TAG"
+            echo "has_new_tags=true" >> "$GITHUB_OUTPUT"
+            echo "target_ref=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.inputs.force_sync }}" = "true" ]; then
+            echo "Sincronización forzada manualmente con upstream/main."
+            echo "has_new_tags=true" >> "$GITHUB_OUTPUT"
+            echo "target_ref=upstream/main" >> "$GITHUB_OUTPUT"
+          else
+            echo "No hay nuevos tags en upstream. Omitiendo sincronización."
+            echo "has_new_tags=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream into main
+        if: steps.check_tags.outputs.has_new_tags == 'true'
         run: |
-          git push origin HEAD:main
+          TARGET="${{ steps.check_tags.outputs.target_ref }}"
+          echo "Fusionando $TARGET en main..."
+          git merge --no-edit "$TARGET"
+
+      - name: Push updated main and tags to fork
+        if: steps.check_tags.outputs.has_new_tags == 'true'
+        run: |
+          echo "Subiendo cambios y tags a origin..."
+          git push origin HEAD:main --tags
